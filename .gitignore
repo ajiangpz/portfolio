@@ -1,0 +1,8 @@
+node_modules
+.next
+out
+.vercel
+.sites-runtime
+*.log
+*.tsbuildinfo
+.DS_Store
