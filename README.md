@@ -1,3 +1,17 @@
 # JOHN / DIGITAL ORBIT
 
-A solar-system themed portfolio for a frontend and AI Agent engineer.
+An interactive solar-system portfolio built with Next.js, React Three Fiber, and TypeScript.
+
+## Development
+
+```bash
+npm install
+npm run dev
+```
+
+## Production
+
+```bash
+npm run build
+npm run start
+```
