@@ -1,9 +1,11 @@
 "use client";
 
 import { Line } from "@react-three/drei";
-import { Canvas, useFrame, useThree } from "@react-three/fiber";
+import { createRoot, events, extend, useFrame, useThree } from "@react-three/fiber";
 import { useEffect, useMemo, useRef } from "react";
 import * as THREE from "three";
+import { fitComposition } from "@/lib/scene-layout";
+import { SceneBoundary } from "./scene-boundary";
 
 export type SceneName = "solar" | "mars" | "saturn" | "void";
 
@@ -303,12 +305,22 @@ function Scene({ activeScene, reducedMotion }: Pick<SceneProps, "activeScene" | 
   const solar = useRef<THREE.Group>(null);
   const mars = useRef<THREE.Group>(null);
   const saturn = useRef<THREE.Group>(null);
-  const { pointer, camera, viewport } = useThree();
+  const { pointer, camera, viewport, size, invalidate } = useThree();
+  useEffect(() => { invalidate(); }, [activeScene, reducedMotion, invalidate]);
+  // getCurrentViewport uses actual pixel aspect and the camera distance to the body plane.
+  // A pixel breakpoint matches the compact CSS layout; world-unit width alone misclassifies tablets.
+  const view = viewport.getCurrentViewport(camera, [0, 0, 0], size);
+  const compact = size.width <= 1100 || size.height > size.width;
+  const layout = {
+    solar: fitComposition("solar", view.width, view.height, compact),
+    mars: fitComposition("mars", view.width, view.height, compact),
+    saturn: fitComposition("saturn", view.width, view.height, compact),
+  };
   const orbitOne = useMemo(() => Array.from({ length: 100 }, (_, i) => { const a = i / 99 * Math.PI * 2; return [Math.cos(a) * 5.1, Math.sin(a) * 1.08, -.25] as [number, number, number]; }), []);
   const orbitTwo = useMemo(() => Array.from({ length: 100 }, (_, i) => { const a = i / 99 * Math.PI * 2; return [Math.cos(a) * 6.5, Math.sin(a) * 1.72, -.5] as [number, number, number]; }), []);
 
   useFrame((state, delta) => {
-    const step = 1 - Math.exp(-delta * 3.5);
+    const step = reducedMotion ? 1 : 1 - Math.exp(-Math.min(delta, .1) * 3.5);
     const targets: Record<"solar" | "mars" | "saturn", number> = {
       solar: activeScene === "solar" ? 1 : .001,
       mars: activeScene === "mars" ? 1 : .001,
@@ -322,15 +334,7 @@ function Scene({ activeScene, reducedMotion }: Pick<SceneProps, "activeScene" | 
     camera.position.y = THREE.MathUtils.lerp(camera.position.y, pointer.y * parallax, step);
     camera.lookAt(0, 0, 0);
     state.gl.toneMappingExposure = activeScene === "solar" ? 1.08 : .96;
-    if (viewport.width < 7) {
-      if (solar.current) solar.current.position.x = -1.6;
-      if (mars.current) mars.current.position.x = -1.45;
-      if (saturn.current) saturn.current.position.x = 1.65;
-    } else {
-      if (solar.current) solar.current.position.x = 0;
-      if (mars.current) mars.current.position.x = 0;
-      if (saturn.current) saturn.current.position.x = 0;
-    }
+
   });
 
   return <>
@@ -338,30 +342,107 @@ function Scene({ activeScene, reducedMotion }: Pick<SceneProps, "activeScene" | 
     <ambientLight intensity={.09} />
     <directionalLight position={[-5, 4, 7]} color="#ffd0a2" intensity={2.1} />
     <StarField reducedMotion={reducedMotion} />
-    <group ref={solar}>
+    <group position={layout.solar.position} scale={layout.solar.scale}><group ref={solar}>
       <Sun reducedMotion={reducedMotion} /><Earth reducedMotion={reducedMotion} />
       <Line points={orbitOne} color="#f1e5d0" transparent opacity={.17} lineWidth={.45} />
       <Line points={orbitTwo} color="#e69a45" transparent opacity={.17} lineWidth={.5} />
-    </group>
-    <group ref={mars} scale={.001}><Mars reducedMotion={reducedMotion} /></group>
-    <group ref={saturn} scale={.001}><Saturn reducedMotion={reducedMotion} /></group>
+    </group></group>
+    <group position={layout.mars.position} scale={layout.mars.scale}><group ref={mars} scale={.001}><Mars reducedMotion={reducedMotion} /></group></group>
+    <group position={layout.saturn.position} scale={layout.saturn.scale}><group ref={saturn} scale={.001}><Saturn reducedMotion={reducedMotion} /></group></group>
   </>;
 }
 
-export function SolarSystemScene({ activeScene, reducedMotion, onReady, onFailure }: SceneProps) {
-  return <Canvas
-    className="three-canvas"
-    camera={{ position: [0, 0, 10], fov: 42, near: .1, far: 100 }}
-    dpr={[1, 1.75]}
-    gl={{ antialias: true, alpha: true, powerPreference: "high-performance", failIfMajorPerformanceCaveat: false }}
-    onCreated={({ gl }) => {
-      gl.outputColorSpace = THREE.SRGBColorSpace;
-      gl.toneMapping = THREE.ACESFilmicToneMapping;
-      onReady();
-      gl.domElement.addEventListener("webglcontextlost", onFailure, { once: true });
-    }}
-    onPointerMissed={() => undefined}
-  >
-    <Scene activeScene={activeScene} reducedMotion={reducedMotion} />
-  </Canvas>;
+export function SolarSystemScene(props: SceneProps) {
+  const hostRef = useRef<HTMLDivElement>(null);
+  const latest = useRef(props);
+  latest.current = props;
+  const updateRef = useRef<() => void>(() => undefined);
+
+  useEffect(() => {
+    const host = hostRef.current!;
+    // Own initialization explicitly: R3F Canvas's async configure rejection bypasses React boundaries.
+    // A fresh canvas also isolates StrictMode replay from R3F's delayed root disposal.
+    const canvas = document.createElement("canvas");
+    canvas.style.cssText = "display:block;width:100%;height:100%";
+    host.appendChild(canvas);
+    let renderer: THREE.WebGLRenderer;
+    try {
+      renderer = new THREE.WebGLRenderer({ canvas, antialias: true, alpha: true, powerPreference: "high-performance", failIfMajorPerformanceCaveat: false });
+    } catch {
+      canvas.remove();
+      latest.current.onFailure();
+      return;
+    }
+    renderer.outputColorSpace = THREE.SRGBColorSpace;
+    renderer.toneMapping = THREE.ACESFilmicToneMapping;
+    extend({
+      Group: THREE.Group, Mesh: THREE.Mesh, Points: THREE.Points, Fog: THREE.Fog,
+      AmbientLight: THREE.AmbientLight, DirectionalLight: THREE.DirectionalLight, PointLight: THREE.PointLight,
+      BufferGeometry: THREE.BufferGeometry, BufferAttribute: THREE.BufferAttribute,
+      SphereGeometry: THREE.SphereGeometry, RingGeometry: THREE.RingGeometry,
+      ShaderMaterial: THREE.ShaderMaterial, MeshBasicMaterial: THREE.MeshBasicMaterial,
+      MeshStandardMaterial: THREE.MeshStandardMaterial, PointsMaterial: THREE.PointsMaterial,
+    });
+    const root = createRoot(canvas);
+    let disposed = false;
+    let pending = Promise.resolve();
+    const update = () => {
+      // Serialize resize and locale/scene updates so configure calls cannot race initialization.
+      pending = pending.then(async () => {
+        if (disposed) return;
+        const { width, height, top, left } = host.getBoundingClientRect();
+        if (!width || !height) return;
+        await root.configure({
+          gl: renderer, events, size: { width, height, top, left },
+          camera: { position: [0, 0, 10], fov: 42, near: .1, far: 100 },
+          dpr: [1, 1.75], frameloop: latest.current.reducedMotion ? "demand" : "always",
+        });
+        if (disposed) return;
+        const current = latest.current;
+        root.render(<SceneBoundary onFailure={current.onFailure}>
+          <RendererLifecycle onReady={current.onReady} onFailure={current.onFailure} />
+          <Scene activeScene={current.activeScene} reducedMotion={current.reducedMotion} />
+        </SceneBoundary>);
+      }).catch(() => { if (!disposed) latest.current.onFailure(); });
+    };
+    updateRef.current = update;
+    const observer = new ResizeObserver(update);
+    observer.observe(host);
+    update();
+    return () => {
+      disposed = true;
+      updateRef.current = () => undefined;
+      observer.disconnect();
+      root.unmount();
+      renderer.dispose();
+      canvas.remove();
+    };
+  }, []);
+
+  useEffect(() => { updateRef.current(); }, [props.activeScene, props.reducedMotion, props.onReady, props.onFailure]);
+  return <div className="three-canvas" ref={hostRef} />;
+}
+
+function RendererLifecycle({ onReady, onFailure }: Pick<SceneProps, "onReady" | "onFailure">) {
+  const gl = useThree((state) => state.gl);
+  const rendered = useRef(false);
+  const readyCallback = useRef(onReady);
+  readyCallback.current = onReady;
+  const frame = useRef<number | null>(null);
+  useFrame(() => {
+    if (rendered.current) return;
+    rendered.current = true;
+    // Canvas creation precedes shader compilation. Reveal WebGL only after a rendered frame.
+    frame.current = requestAnimationFrame(() => readyCallback.current());
+  });
+  useEffect(() => {
+    const canvas = gl.domElement;
+    const lost = (event: Event) => { event.preventDefault(); onFailure(); };
+    canvas.addEventListener("webglcontextlost", lost);
+    return () => {
+      canvas.removeEventListener("webglcontextlost", lost);
+      if (frame.current !== null) cancelAnimationFrame(frame.current);
+    };
+  }, [gl, onFailure]);
+  return null;
 }
