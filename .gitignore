@@ -1,0 +1,11 @@
+node_modules
+.next
+out
+.vercel
+.sites-runtime
+*.log
+*.tsbuildinfo
+.DS_Store
+test-results/
+playwright-report/
+docs/verification/*.png
